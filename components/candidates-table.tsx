@@ -20,7 +20,7 @@ import {
 import { Checkbox } from "@/components/ui/checkbox";
 import {
   Loader2, Send, RefreshCw, ChevronLeft, ChevronRight,
-  Columns3, Mail, CheckSquare, Eye, CheckCircle2, XCircle, Clock, Search, Filter,
+  Columns3, Mail, CheckSquare, Eye, CheckCircle2, XCircle, Clock, Search, Filter, ArrowUpDown,
 } from "lucide-react";
 
 import { ColumnMapping } from "@/components/column-mapper";
@@ -173,6 +173,7 @@ export default function CandidatesTable({
   const [search, setSearch] = useState("");
   const [resultFilter, setResultFilter] = useState<"all" | "selected" | "rejected">("all");
   const [statusFilter, setStatusFilter] = useState<"all" | "unsent" | "sent">("all");
+  const [sortOrder, setSortOrder] = useState<"newest" | "oldest">("newest");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(50);
   const [visibleCols, setVisibleCols] = useState<Set<string>>(new Set());
@@ -228,10 +229,10 @@ export default function CandidatesTable({
     loadData();
   }, [sheetUrl, loadData]);
 
-  // Filtered rows
+  // Filtered & Sorted rows
   const filteredRows = useMemo(() => {
     const q = search.toLowerCase().trim();
-    return allRows.filter((r) => {
+    const rows = allRows.filter((r) => {
       const email = getEmailField(r, headers, columnMapping);
       const name = getNameField(r, headers, columnMapping);
       const id = getCandidateIdField(r, headers, columnMapping);
@@ -262,7 +263,13 @@ export default function CandidatesTable({
 
       return true;
     });
-  }, [allRows, headers, columnMapping, search, resultFilter, statusFilter, emailStatusHeader]);
+
+    // Ensure Newest Data Appears First by Row Index
+    return rows.sort((a, b) => {
+      if (sortOrder === "newest") return b._rowIndex - a._rowIndex;
+      return a._rowIndex - b._rowIndex;
+    });
+  }, [allRows, headers, columnMapping, search, resultFilter, statusFilter, sortOrder, emailStatusHeader]);
 
   // Pagination
   const totalPages = Math.max(1, Math.ceil(filteredRows.length / pageSize));
@@ -524,6 +531,23 @@ export default function CandidatesTable({
               <SelectItem value="all" className="text-xs">All Status</SelectItem>
               <SelectItem value="unsent" className="text-xs">Unsent / Pending</SelectItem>
               <SelectItem value="sent" className="text-xs">Sent Only</SelectItem>
+            </SelectContent>
+          </Select>
+
+          {/* Sort Order */}
+          <Select
+            value={sortOrder}
+            onValueChange={(v) => {
+              if (v) setSortOrder(v as "newest" | "oldest");
+            }}
+          >
+            <SelectTrigger className="h-9 text-xs w-36">
+              <ArrowUpDown className="h-3.5 w-3.5 mr-1.5 text-slate-400" />
+              <SelectValue placeholder="Sort Order" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="newest" className="text-xs font-medium">Newest First (Row ↓)</SelectItem>
+              <SelectItem value="oldest" className="text-xs font-medium">Oldest First (Row ↑)</SelectItem>
             </SelectContent>
           </Select>
 

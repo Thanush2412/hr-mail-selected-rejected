@@ -16,6 +16,10 @@ function extractSheetName(url: string): string | null {
   return match ? decodeURIComponent(match[1]) : null;
 }
 
+/**
+ * Ultra-fast direct Google Sheet fetch via GViz API (typically 100-300ms).
+ * Iterates in reverse order so the newest rows (added at the bottom of the sheet) appear first.
+ */
 async function fetchDirectFromSheet(sheetUrl: string, explicitGid?: string | null, sheetName?: string | null) {
   const sheetId = extractSheetId(sheetUrl);
   if (!sheetId) {
@@ -61,12 +65,12 @@ async function fetchDirectFromSheet(sheetUrl: string, explicitGid?: string | nul
     return c.id || `Column ${idx + 1}`;
   });
 
-  // Filter out completely empty trailing columns
   const activeHeaders = headers.filter((h: string) => h && !h.match(/^[A-Z]$/i));
   const finalHeaders = activeHeaders.length > 0 ? activeHeaders : headers;
 
   const allRows: Record<string, unknown>[] = [];
 
+  // Reverse loop: New rows added at the bottom appear at the very top of the table
   for (let i = rawRows.length - 1; i >= 0; i--) {
     const rowObj: Record<string, unknown> = {};
     const cells = rawRows[i]?.c || [];
@@ -112,7 +116,15 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ status: "error", message: "No sheet URL provided" }, { status: 400 });
     }
 
-    // Try GAS first if gasUrl configured
+    // 1. FAST PATH: Fetch directly from Google Sheets GViz API (under 250ms)
+    try {
+      const result = await fetchDirectFromSheet(sheetUrl, gidParam, sheetParam);
+      return NextResponse.json(result);
+    } catch (directErr) {
+      console.warn("[sheet API] Direct sheet fetch failed, falling back to GAS:", directErr);
+    }
+
+    // 2. FALLBACK PATH: If direct fetch is restricted, use GAS Web App
     if (gasUrl) {
       try {
         const page = searchParams.get("page") || "1";
@@ -138,21 +150,15 @@ export async function GET(req: NextRequest) {
           }
         }
       } catch (err: unknown) {
-        console.warn("[sheet API] GAS fetch failed, falling back to direct sheet fetch:", err);
+        console.warn("[sheet API] GAS fallback failed:", err);
       }
     }
 
-    // Direct sheet fetch fallback
-    try {
-      const result = await fetchDirectFromSheet(sheetUrl, gidParam, sheetParam);
-      return NextResponse.json(result);
-    } catch (directErr: unknown) {
-      const msg = directErr instanceof Error ? directErr.message : String(directErr);
-      return NextResponse.json({
-        status: "error",
-        message: `Failed to fetch sheet data: ${msg}`,
-      }, { status: 502 });
-    }
+    return NextResponse.json({
+      status: "error",
+      message: "Could not fetch Google Sheet data. Please ensure the Google Sheet sharing permission is set to 'Anyone with the link can view' or check your GAS URL.",
+    }, { status: 502 });
+
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     return NextResponse.json({ status: "error", message: msg }, { status: 500 });
