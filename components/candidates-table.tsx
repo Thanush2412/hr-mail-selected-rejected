@@ -147,10 +147,22 @@ function ResultBadge({ value }: { value: string }) {
   return <Badge variant="secondary" className="px-2 py-0.5">{value || "—"}</Badge>;
 }
 
+function isRowSent(status: string | number | undefined | null): boolean {
+  if (!status) return false;
+  const s = String(status).trim().toLowerCase();
+  return (
+    s.startsWith("✓") ||
+    s.startsWith("sent") ||
+    s.includes("sent to") ||
+    s.startsWith("accepted") ||
+    s.startsWith("offer sent")
+  );
+}
+
 function EmailStatusBadge({ value }: { value: string }) {
   const v = value ?? "";
   if (!v) return <span className="text-slate-400 text-xs">—</span>;
-  if (v.startsWith("✓") || v.startsWith("Sent")) {
+  if (isRowSent(v)) {
     return <span className="text-emerald-600 text-xs font-semibold flex items-center gap-1"><CheckSquare className="h-3.5 w-3.5" />{v}</span>;
   }
   if (v.startsWith("✗") || v.toLowerCase().includes("fail")) {
@@ -245,7 +257,7 @@ export default function CandidatesTable({
       if (resultFilter === "rejected" && result !== "rejected") return false;
 
       // Status filter
-      const isSent = status.startsWith("✓") || status.startsWith("Sent");
+      const isSent = isRowSent(status);
       if (statusFilter === "sent" && !isSent) return false;
       if (statusFilter === "unsent" && isSent) return false;
 
@@ -271,6 +283,17 @@ export default function CandidatesTable({
     });
   }, [allRows, headers, columnMapping, search, resultFilter, statusFilter, sortOrder, emailStatusHeader]);
 
+  // Sendable rows (Unsent + Valid Result + Valid Email)
+  const sendableRows = useMemo(() => {
+    return filteredRows.filter((r) => {
+      const email = getEmailField(r, headers, columnMapping);
+      const res = getResultField(r, headers, columnMapping).toLowerCase().trim();
+      const status = emailStatusHeader ? String(r[emailStatusHeader] ?? "") : "";
+      const isSent = isRowSent(status);
+      return (res === "selected" || res === "rejected") && !!email && !isSent;
+    });
+  }, [filteredRows, headers, columnMapping, emailStatusHeader]);
+
   // Pagination
   const totalPages = Math.max(1, Math.ceil(filteredRows.length / pageSize));
   const paginatedRows = useMemo(() => {
@@ -288,7 +311,7 @@ export default function CandidatesTable({
     for (const r of allRows) {
       const res = getResultField(r, headers, columnMapping).toLowerCase().trim();
       const status = emailStatusHeader ? String(r[emailStatusHeader] ?? "") : "";
-      const isSent = status.startsWith("✓") || status.startsWith("Sent");
+      const isSent = isRowSent(status);
 
       if (res === "selected") totalSelected++;
       if (res === "rejected") totalRejected++;
@@ -301,10 +324,12 @@ export default function CandidatesTable({
 
   // Selection handlers
   const toggleSelectAll = () => {
-    if (selected.size === filteredRows.length) {
+    if (sendableRows.length === 0) return;
+    const allSendableSelected = sendableRows.every((r) => selected.has(r._rowIndex));
+    if (allSendableSelected) {
       setSelected(new Set());
     } else {
-      setSelected(new Set(filteredRows.map((r) => r._rowIndex)));
+      setSelected(new Set(sendableRows.map((r) => r._rowIndex)));
     }
   };
 
@@ -322,6 +347,12 @@ export default function CandidatesTable({
     const email = getEmailField(row, headers, columnMapping);
     const candidateId = getCandidateIdField(row, headers, columnMapping);
     const result = getResultField(row, headers, columnMapping);
+    const status = emailStatusHeader ? String(row[emailStatusHeader] ?? "") : "";
+
+    if (isRowSent(status)) {
+      toast.info(`Email already sent previously to ${name} (${email})`);
+      return;
+    }
 
     if (!email) {
       toast.error(`Missing email address for row ${rowIndex}`);
@@ -362,6 +393,12 @@ export default function CandidatesTable({
               : r
           )
         );
+        // Remove from selection if it was selected
+        setSelected((prev) => {
+          const next = new Set(prev);
+          next.delete(rowIndex);
+          return next;
+        });
       } else {
         toast.error(data.error || data.message || "Failed to send email");
       }
@@ -374,8 +411,17 @@ export default function CandidatesTable({
 
   // Send Bulk Emails
   const handleBulkSend = async () => {
-    const targetRows = allRows.filter((r) => selected.has(r._rowIndex));
-    if (targetRows.length === 0) return;
+    const targetRows = allRows.filter((r) => {
+      if (!selected.has(r._rowIndex)) return false;
+      const status = emailStatusHeader ? String(r[emailStatusHeader] ?? "") : "";
+      return !isRowSent(status);
+    });
+
+    if (targetRows.length === 0) {
+      toast.info("No unsent candidates selected.");
+      setBulkOpen(false);
+      return;
+    }
 
     setBulkSending(true);
     setBulkProgress({ current: 0, total: targetRows.length });
@@ -445,6 +491,8 @@ export default function CandidatesTable({
     setSelected(new Set());
     toast.success(`Bulk dispatch finished: ${sentCount} sent, ${failCount} failed/skipped.`);
   };
+
+  const isAllSendableSelected = sendableRows.length > 0 && sendableRows.every((r) => selected.has(r._rowIndex));
 
   return (
     <div className="space-y-4">
@@ -613,8 +661,10 @@ export default function CandidatesTable({
               <TableRow>
                 <TableHead className="w-10 text-center">
                   <Checkbox
-                    checked={filteredRows.length > 0 && selected.size === filteredRows.length}
+                    checked={isAllSendableSelected}
                     onCheckedChange={toggleSelectAll}
+                    disabled={sendableRows.length === 0}
+                    title={sendableRows.length === 0 ? "No unsent candidates to select" : "Select all unsent candidates"}
                   />
                 </TableHead>
                 <TableHead className="w-12 text-xs font-bold text-slate-600">Row</TableHead>
@@ -652,9 +702,10 @@ export default function CandidatesTable({
                   const role = getRoleField(row, headers, columnMapping);
                   const result = getResultField(row, headers, columnMapping);
                   const status = emailStatusHeader ? String(row[emailStatusHeader] ?? "") : "";
+                  const isSent = isRowSent(status);
                   const isSendingThis = sending[rowIndex];
                   const isSelected = selected.has(rowIndex);
-                  const canSend = (result.toLowerCase().trim() === "selected" || result.toLowerCase().trim() === "rejected") && email;
+                  const canSend = (result.toLowerCase().trim() === "selected" || result.toLowerCase().trim() === "rejected") && !!email && !isSent;
 
                   return (
                     <TableRow key={rowIndex} className={`hover:bg-slate-50/80 transition-colors ${isSelected ? "bg-orange-50/50" : ""}`}>
@@ -662,6 +713,8 @@ export default function CandidatesTable({
                         <Checkbox
                           checked={isSelected}
                           onCheckedChange={() => toggleSelectRow(rowIndex)}
+                          disabled={isSent}
+                          title={isSent ? "Email already sent" : undefined}
                         />
                       </TableCell>
                       <TableCell className="text-xs font-mono text-slate-400">{rowIndex}</TableCell>
@@ -691,21 +744,35 @@ export default function CandidatesTable({
                             <Eye className="h-3.5 w-3.5" />
                           </Button>
 
-                          {/* Send Single Email */}
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            onClick={() => sendEmail(row)}
-                            disabled={isSendingThis || !canSend}
-                            className="h-8 text-xs font-medium gap-1 text-slate-700 hover:text-slate-900 border-slate-300"
-                          >
-                            {isSendingThis ? (
-                              <Loader2 className="h-3.5 w-3.5 animate-spin text-[#f05136]" />
-                            ) : (
-                              <Mail className="h-3.5 w-3.5 text-[#f05136]" />
-                            )}
-                            Send
-                          </Button>
+                          {/* Send Single Email or Disabled Sent Indicator */}
+                          {isSent ? (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              disabled={true}
+                              className="h-8 text-xs font-semibold gap-1 text-emerald-700 bg-emerald-50/70 border-emerald-200 cursor-not-allowed opacity-90 shadow-none select-none"
+                              title="Email has already been sent to this candidate"
+                            >
+                              <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" />
+                              Sent
+                            </Button>
+                          ) : (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => sendEmail(row)}
+                              disabled={isSendingThis || !canSend}
+                              className="h-8 text-xs font-medium gap-1 text-slate-700 hover:text-slate-900 border-slate-300 hover:bg-slate-50 cursor-pointer"
+                              title={!canSend ? "Missing valid result or email" : `Send email to ${email}`}
+                            >
+                              {isSendingThis ? (
+                                <Loader2 className="h-3.5 w-3.5 animate-spin text-[#f05136]" />
+                              ) : (
+                                <Mail className="h-3.5 w-3.5 text-[#f05136]" />
+                              )}
+                              Send
+                            </Button>
+                          )}
                         </div>
                       </TableCell>
                     </TableRow>
@@ -783,6 +850,8 @@ export default function CandidatesTable({
             const email = getEmailField(previewRow, headers, columnMapping);
             const candidateId = getCandidateIdField(previewRow, headers, columnMapping);
             const result = getResultField(previewRow, headers, columnMapping);
+            const status = emailStatusHeader ? String(previewRow[emailStatusHeader] ?? "") : "";
+            const isSent = isRowSent(status);
             const template = buildTemplate(result, name, candidateId);
 
             return (
@@ -848,14 +917,35 @@ export default function CandidatesTable({
                   {template && email && (
                     <Button
                       size="sm"
+                      disabled={isSent || !!sending[previewRow._rowIndex]}
                       onClick={() => {
+                        if (isSent) return;
                         sendEmail(previewRow);
                         setPreviewRow(null);
                       }}
-                      className="bg-[#f05136] hover:bg-[#d94228] text-white text-xs font-semibold gap-1.5 shadow-sm"
+                      className={
+                        isSent
+                          ? "bg-emerald-50 border border-emerald-200 text-emerald-700 text-xs font-semibold gap-1.5 cursor-not-allowed opacity-90 shadow-none"
+                          : "bg-[#f05136] hover:bg-[#d94228] text-white text-xs font-semibold gap-1.5 shadow-sm"
+                      }
+                      title={isSent ? "Email already sent" : undefined}
                     >
-                      <Send className="h-3.5 w-3.5" />
-                      Send This Email Now
+                      {isSent ? (
+                        <>
+                          <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" />
+                          Already Sent
+                        </>
+                      ) : sending[previewRow._rowIndex] ? (
+                        <>
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          Sending...
+                        </>
+                      ) : (
+                        <>
+                          <Send className="h-3.5 w-3.5" />
+                          Send This Email Now
+                        </>
+                      )}
                     </Button>
                   )}
                 </DialogFooter>
