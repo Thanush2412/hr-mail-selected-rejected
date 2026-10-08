@@ -171,6 +171,19 @@ function EmailStatusBadge({ value }: { value: string }) {
   return <span className="text-xs text-slate-600">{v}</span>;
 }
 
+function canSendCandidate(
+  row: Candidate,
+  headers: string[],
+  columnMapping: ColumnMapping,
+  emailStatusHeader?: string
+): boolean {
+  const email = getEmailField(row, headers, columnMapping);
+  const res = getResultField(row, headers, columnMapping).toLowerCase().trim();
+  const status = emailStatusHeader ? String(row[emailStatusHeader] ?? "") : "";
+  const isSent = isRowSent(status);
+  return (res === "selected" || res === "rejected") && Boolean(email) && !isSent;
+}
+
 export default function CandidatesTable({
   sheetUrl,
   columnMapping = {},
@@ -283,15 +296,9 @@ export default function CandidatesTable({
     });
   }, [allRows, headers, columnMapping, search, resultFilter, statusFilter, sortOrder, emailStatusHeader]);
 
-  // Sendable rows (Unsent + Valid Result + Valid Email)
-  const sendableRows = useMemo(() => {
-    return filteredRows.filter((r) => {
-      const email = getEmailField(r, headers, columnMapping);
-      const res = getResultField(r, headers, columnMapping).toLowerCase().trim();
-      const status = emailStatusHeader ? String(r[emailStatusHeader] ?? "") : "";
-      const isSent = isRowSent(status);
-      return (res === "selected" || res === "rejected") && !!email && !isSent;
-    });
+  // All sendable rows matching current filters across all pages
+  const allFilteredSendableRows = useMemo(() => {
+    return filteredRows.filter((r) => canSendCandidate(r, headers, columnMapping, emailStatusHeader));
   }, [filteredRows, headers, columnMapping, emailStatusHeader]);
 
   // Pagination
@@ -300,6 +307,53 @@ export default function CandidatesTable({
     const start = (page - 1) * pageSize;
     return filteredRows.slice(start, start + pageSize);
   }, [filteredRows, page, pageSize]);
+
+  // Sendable rows on the current page
+  const pageSendableRows = useMemo(() => {
+    return paginatedRows.filter((r) => canSendCandidate(r, headers, columnMapping, emailStatusHeader));
+  }, [paginatedRows, headers, columnMapping, emailStatusHeader]);
+
+  const pageSendableIndices = useMemo(() => {
+    return pageSendableRows.map((r) => r._rowIndex);
+  }, [pageSendableRows]);
+
+  // Prune any selected indices that are no longer part of current active filtered sendable rows
+  useEffect(() => {
+    const validIndices = new Set(allFilteredSendableRows.map((r) => r._rowIndex));
+    setSelected((prev) => {
+      let hasInvalid = false;
+      for (const idx of prev) {
+        if (!validIndices.has(idx)) {
+          hasInvalid = true;
+          break;
+        }
+      }
+      if (!hasInvalid) return prev;
+      const next = new Set<number>();
+      for (const idx of prev) {
+        if (validIndices.has(idx)) next.add(idx);
+      }
+      return next;
+    });
+  }, [allFilteredSendableRows]);
+
+  // Selection state on current page
+  const selectedOnPageCount = useMemo(() => {
+    let count = 0;
+    for (const idx of pageSendableIndices) {
+      if (selected.has(idx)) count++;
+    }
+    return count;
+  }, [selected, pageSendableIndices]);
+
+  const isAllOnPageSelected = pageSendableIndices.length > 0 && selectedOnPageCount === pageSendableIndices.length;
+  const isSomeOnPageSelected = selectedOnPageCount > 0 && !isAllOnPageSelected;
+
+  const headerCheckboxChecked: boolean | "indeterminate" = isAllOnPageSelected
+    ? true
+    : isSomeOnPageSelected
+    ? "indeterminate"
+    : false;
 
   // Counts & Statistics
   const stats = useMemo(() => {
@@ -322,15 +376,33 @@ export default function CandidatesTable({
     return { total: allRows.length, totalSelected, totalRejected, totalSent, totalPending };
   }, [allRows, headers, columnMapping, emailStatusHeader]);
 
-  // Selection handlers
-  const toggleSelectAll = () => {
-    if (sendableRows.length === 0) return;
-    const allSendableSelected = sendableRows.every((r) => selected.has(r._rowIndex));
-    if (allSendableSelected) {
-      setSelected(new Set());
+  // Toggle selection for sendable rows on current page
+  const toggleSelectPage = () => {
+    if (pageSendableIndices.length === 0) return;
+    if (isAllOnPageSelected) {
+      setSelected((prev) => {
+        const next = new Set(prev);
+        pageSendableIndices.forEach((idx) => next.delete(idx));
+        return next;
+      });
     } else {
-      setSelected(new Set(sendableRows.map((r) => r._rowIndex)));
+      setSelected((prev) => {
+        const next = new Set(prev);
+        pageSendableIndices.forEach((idx) => next.add(idx));
+        return next;
+      });
     }
+  };
+
+  // Select ALL sendable rows matching current filters across all pages
+  const selectAllFiltered = () => {
+    setSelected(new Set(allFilteredSendableRows.map((r) => r._rowIndex)));
+    toast.success(`Selected all ${allFilteredSendableRows.length} candidates matching current filters`);
+  };
+
+  // Clear all selection
+  const clearSelection = () => {
+    setSelected(new Set());
   };
 
   const toggleSelectRow = (rowIndex: number) => {
@@ -492,8 +564,6 @@ export default function CandidatesTable({
     toast.success(`Bulk dispatch finished: ${sentCount} sent, ${failCount} failed/skipped.`);
   };
 
-  const isAllSendableSelected = sendableRows.length > 0 && sendableRows.every((r) => selected.has(r._rowIndex));
-
   return (
     <div className="space-y-4">
       {/* ── STATS SUMMARY CARDS ── */}
@@ -615,14 +685,35 @@ export default function CandidatesTable({
         {/* Bulk Action & Column Selector */}
         <div className="flex items-center gap-2">
           {selected.size > 0 && (
-            <Button
-              size="sm"
-              onClick={() => setBulkOpen(true)}
-              className="h-9 bg-[#f05136] hover:bg-[#d94228] text-white text-xs font-semibold gap-1.5 shadow-sm"
-            >
-              <Send className="h-3.5 w-3.5" />
-              Send Selected ({selected.size})
-            </Button>
+            <div className="flex items-center gap-1.5">
+              <Button
+                size="sm"
+                onClick={() => setBulkOpen(true)}
+                className="h-9 bg-[#f05136] hover:bg-[#d94228] text-white text-xs font-semibold gap-1.5 shadow-sm"
+              >
+                <Send className="h-3.5 w-3.5" />
+                Send Selected ({selected.size})
+              </Button>
+              {selected.size < allFilteredSendableRows.length && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={selectAllFiltered}
+                  className="h-9 text-xs font-medium text-slate-700 hover:text-slate-900 border-slate-300 bg-white"
+                  title="Select all matching candidates across all pages"
+                >
+                  Select All ({allFilteredSendableRows.length})
+                </Button>
+              )}
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={clearSelection}
+                className="h-9 text-xs text-slate-500 hover:text-slate-800"
+              >
+                Clear
+              </Button>
+            </div>
           )}
 
           <Popover>
@@ -653,6 +744,44 @@ export default function CandidatesTable({
         </div>
       </div>
 
+      {/* ── SELECTION NOTIFICATION BANNER ── */}
+      {isAllOnPageSelected && allFilteredSendableRows.length > pageSendableRows.length && selected.size < allFilteredSendableRows.length && (
+        <div className="bg-orange-50 border border-orange-200 text-orange-950 text-xs px-4 py-2.5 rounded-xl flex items-center justify-between shadow-xs">
+          <div>
+            All <strong>{pageSendableRows.length}</strong> sendable candidates on this page are selected.
+          </div>
+          <div className="flex items-center gap-3">
+            <button
+              onClick={selectAllFiltered}
+              className="font-bold text-[#f05136] hover:text-[#d94228] underline underline-offset-2 transition-colors cursor-pointer"
+            >
+              Select all {allFilteredSendableRows.length} candidates matching current filter
+            </button>
+            <span className="text-orange-300">|</span>
+            <button
+              onClick={clearSelection}
+              className="text-slate-600 hover:text-slate-900 font-medium transition-colors cursor-pointer"
+            >
+              Clear selection
+            </button>
+          </div>
+        </div>
+      )}
+
+      {selected.size > 0 && selected.size === allFilteredSendableRows.length && allFilteredSendableRows.length > pageSendableRows.length && (
+        <div className="bg-emerald-50 border border-emerald-200 text-emerald-950 text-xs px-4 py-2.5 rounded-xl flex items-center justify-between shadow-xs">
+          <div>
+            All <strong>{allFilteredSendableRows.length}</strong> candidates matching current filter across all pages are selected.
+          </div>
+          <button
+            onClick={clearSelection}
+            className="text-emerald-800 hover:text-emerald-950 font-bold underline underline-offset-2 transition-colors cursor-pointer"
+          >
+            Clear selection
+          </button>
+        </div>
+      )}
+
       {/* ── CANDIDATES DATA TABLE ── */}
       <div className="bg-white border rounded-xl overflow-hidden shadow-xs">
         <div className="overflow-x-auto">
@@ -661,10 +790,16 @@ export default function CandidatesTable({
               <TableRow>
                 <TableHead className="w-10 text-center">
                   <Checkbox
-                    checked={isAllSendableSelected}
-                    onCheckedChange={toggleSelectAll}
-                    disabled={sendableRows.length === 0}
-                    title={sendableRows.length === 0 ? "No unsent candidates to select" : "Select all unsent candidates"}
+                    checked={headerCheckboxChecked}
+                    onCheckedChange={toggleSelectPage}
+                    disabled={pageSendableIndices.length === 0}
+                    title={
+                      pageSendableIndices.length === 0
+                        ? "No sendable candidates on this page"
+                        : isAllOnPageSelected
+                        ? "Deselect all candidates on this page"
+                        : "Select all sendable candidates on this page"
+                    }
                   />
                 </TableHead>
                 <TableHead className="w-12 text-xs font-bold text-slate-600">Row</TableHead>
@@ -705,16 +840,22 @@ export default function CandidatesTable({
                   const isSent = isRowSent(status);
                   const isSendingThis = sending[rowIndex];
                   const isSelected = selected.has(rowIndex);
-                  const canSend = (result.toLowerCase().trim() === "selected" || result.toLowerCase().trim() === "rejected") && !!email && !isSent;
+                  const sendable = canSendCandidate(row, headers, columnMapping, emailStatusHeader);
 
                   return (
                     <TableRow key={rowIndex} className={`hover:bg-slate-50/80 transition-colors ${isSelected ? "bg-orange-50/50" : ""}`}>
                       <TableCell className="text-center">
                         <Checkbox
                           checked={isSelected}
-                          onCheckedChange={() => toggleSelectRow(rowIndex)}
-                          disabled={isSent}
-                          title={isSent ? "Email already sent" : undefined}
+                          onCheckedChange={() => sendable && toggleSelectRow(rowIndex)}
+                          disabled={!sendable}
+                          title={
+                            isSent
+                              ? "Email already sent"
+                              : !sendable
+                              ? "Missing valid recipient email or outcome"
+                              : undefined
+                          }
                         />
                       </TableCell>
                       <TableCell className="text-xs font-mono text-slate-400">{rowIndex}</TableCell>
@@ -761,9 +902,9 @@ export default function CandidatesTable({
                               size="sm"
                               variant="outline"
                               onClick={() => sendEmail(row)}
-                              disabled={isSendingThis || !canSend}
+                              disabled={isSendingThis || !sendable}
                               className="h-8 text-xs font-medium gap-1 text-slate-700 hover:text-slate-900 border-slate-300 hover:bg-slate-50 cursor-pointer"
-                              title={!canSend ? "Missing valid result or email" : `Send email to ${email}`}
+                              title={!sendable ? "Missing valid result or email" : `Send email to ${email}`}
                             >
                               {isSendingThis ? (
                                 <Loader2 className="h-3.5 w-3.5 animate-spin text-[#f05136]" />
